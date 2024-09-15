@@ -49,14 +49,14 @@ func main() {
 	viper.SetDefault("nats.bucketPrefix", "redisnats")
 	viper.SetDefault("nats.timeout", 10*time.Second)
 	viper.SetDefault("redis.address", ":6379")
-	viper.SetDefault("redis.maxDB", 16)
+	viper.SetDefault("redis.numDB", 16)
 
 	// Retrieve configuration from environment variables
 	natsURL := viper.GetString("nats.url")
 	natsBucketPrefix := viper.GetString("nats.bucketPrefix")
 	natsTimeout := viper.GetDuration("nats.timeout")
 	redisURL := viper.GetString("redis.address")
-	redisMaxDB := viper.GetInt("redis.maxDB")
+	redisNumDB := viper.GetInt("redis.numDB")
 
 	// Create and start the fake Redis server using environment variable for Redis URL
 	fakeRedis := redisnats.NewRedisServer(
@@ -65,7 +65,7 @@ func main() {
 			NATSTimeout:      natsTimeout,
 			NATSBucketPrefix: natsBucketPrefix,
 			RedisAddress:     redisURL,
-			RedisMaxDB:       redisMaxDB,
+			RedisNumDB:       redisNumDB,
 		},
 	)
 

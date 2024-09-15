@@ -20,7 +20,7 @@ type Config struct {
 	NATSTimeout      time.Duration
 	NATSBucketPrefix string
 	RedisAddress     string
-	RedisMaxDB       int
+	RedisNumDB       int
 }
 
 // RedisServer represents the fake Redis server that uses a storage backend.
@@ -46,8 +46,8 @@ func (s *RedisServer) Start(ctx context.Context) error {
 	s.log.Info(fmt.Sprintf("%s server is running", appName), "address", s.config.RedisAddress)
 
 	// Create a storage pool with the number of databases specified in the configuration.
-	storagePool := make([]*nats.KV, s.config.RedisMaxDB)
-	for i := 0; i < s.config.RedisMaxDB; i++ {
+	storagePool := make([]*nats.KV, s.config.RedisNumDB)
+	for i := 0; i < s.config.RedisNumDB; i++ {
 		bucket := fmt.Sprintf("%s-%d", s.config.NATSBucketPrefix, i)
 		storage := nats.New(s.config.NATSURL, bucket, s.config.NATSTimeout)
 		err := storage.Connect(ctx)

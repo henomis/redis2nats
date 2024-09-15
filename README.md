@@ -2,7 +2,15 @@
 
 ## Description
 
-This project is a Redis to NATS bridge. It listens for messages on a Redis channel and forwards them to a NATS subject.
+This project is a Redis to NATS bridge. It listens for Redis connections and uses NATS Key-Value store to store the data.
+
+### Supported Redis Commands
+
+       
+```bash
+DECR DEL EXISTS GET HDEL HEXISTS HGET HGETALL HKEYS HLEN HSET INCR KEYS LPOP LPUSH LRANGE MGET MSET PING SELECT SET 
+```
+
 
 ## Table of Contents
 
@@ -70,7 +78,7 @@ Redis2NATS has a configuration file that can be used to set the Redis and NATS c
 ```yaml
 redis:
   address: ":6379"
-  maxDB: 16
+  numDB: 16
 nats:
   url: "nats://localhost:4222"
   bucketPrefix: "redisnats"
@@ -80,7 +88,7 @@ nats:
 description of the configuration options:
 
 - `redis.address`: The address of the Redis2NATS server.
-- `redis.maxDB`: The maximum number of Redis databases.
+- `redis.numDB`: The number of Redis databases.
 - `nats.url`: The URL of the NATS server.
 - `nats.bucketPrefix`: The prefix for the NATS bucket.
 - `nats.timeout`: The timeout for the NATS connection/operations.
