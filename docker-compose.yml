@@ -1,0 +1,37 @@
+
+services:
+  # redis:
+  #   image: redis:latest
+  #   container_name: redis
+  #   ports:
+  #     - "6379:6379"
+  #   networks:
+  #     - redis2nats
+  
+  nats:
+    image: nats:latest
+    container_name: nats
+    command: --js --sd /data
+    ports:
+      - "4222:4222"
+    networks:
+      - redis2nats
+  
+  redis2nats:
+    image: redis2nats:latest
+    container_name: redis2nats
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - redis2nats
+    depends_on:      
+      - nats
+    ports:
+      - "6379:6379"
+    environment:
+      REDIS2NATS_NATS_URL: "nats://nats:4222"
+      
+networks:
+  redis2nats:
+    driver: bridge
