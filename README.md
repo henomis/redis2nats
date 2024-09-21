@@ -8,7 +8,9 @@ This project is a Redis to NATS bridge. It listens for Redis connections and use
 
        
 ```bash
-DECR DEL EXISTS GET HDEL HEXISTS HGET HGETALL HKEYS HLEN HSET INCR KEYS LPOP LPUSH LRANGE MGET MSET PING SELECT SET 
+DECR DEL EXISTS EXPIRE GET HDEL HEXISTS HGET HGETALL
+HKEYS HLEN HSET INCR KEYS LPOP LPUSH LRANGE MGET MSET
+PING SELECT SET SETNX TTL
 ```
 
 
@@ -83,6 +85,7 @@ nats:
   url: "nats://localhost:4222"
   bucketPrefix: "redisnats"
   timeout: "10s"
+  persist: false
 ```
 
 description of the configuration options:
@@ -92,6 +95,7 @@ description of the configuration options:
 - `nats.url`: The URL of the NATS server.
 - `nats.bucketPrefix`: The prefix for the NATS bucket.
 - `nats.timeout`: The timeout for the NATS connection/operations.
+- `nats.persist`: The flag to enable/disable persistence.
 
 ## Connect with the author
 
