@@ -117,7 +117,7 @@ func main() {
 	fmt.Printf("Hash field 'field1': %s\n", val)
 
 	//HGETALL
-	fields, err := rdb.HGetAll(ctx, "myhash").Result()
+	fields, err := rdb.HGetAll(ctx, "myhash2").Result()
 	if err != nil {
 		log.Fatalf("Could not get all hash fields from Redis: %v", err)
 	}

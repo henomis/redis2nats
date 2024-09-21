@@ -2,90 +2,65 @@ package redisnats
 
 import (
 	"bufio"
+	"context"
 	"errors"
-	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/henomis/redis2nats/nats"
 )
 
-var (
-	redisString = func(value string) string {
-		return fmt.Sprintf("$%d\r\n%s", len(value), value)
-	}
-	redisInt = func(value int) string {
-		return fmt.Sprintf(":%d", value)
-	}
-	redisStringArray = func(values ...string) string {
-		var response strings.Builder
-		response.WriteString(redisRESPCommandPrefix)
-		response.WriteString(strconv.Itoa(len(values)))
-		response.WriteString(redisCommandSeparator)
+type redisCommandcmdr func(context.Context, ...string) (string, error)
 
-		for i, value := range values {
-			if value == "" {
-				response.WriteString(redisCommandNil)
-
-			} else {
-				response.WriteString(redisString(value))
-			}
-
-			if i < len(values)-1 {
-				response.WriteString(redisCommandSeparator)
-			}
-		}
-
-		return response.String()
-	}
-)
-
-type redisCommandHandler func(...string) (string, error)
-
-type command struct {
-	redisCommands map[string]redisCommandHandler
+type Command struct {
+	redisCommands map[string]redisCommandcmdr
 	storage       *nats.KV
 	storagePool   []*nats.KV
+	natsTimeout   time.Duration
 	log           *slog.Logger
 }
 
-func NewCommandExecutor(storagePool []*nats.KV) *command {
-	c := &command{
+func NewCommandExecutor(storagePool []*nats.KV, natsTimeout time.Duration) *Command {
+	c := &Command{
 		storage:     storagePool[0],
 		storagePool: storagePool,
+		natsTimeout: natsTimeout,
 		log:         slog.Default().With("module", "redis-command"),
 	}
 
-	c.redisCommands = map[string]redisCommandHandler{
-		"PING":    c.handlePing,
-		"SET":     c.handleSet,
-		"GET":     c.handleGet,
-		"MGET":    c.handleMGet,
-		"MSET":    c.handleMSet,
-		"DEL":     c.handleDel,
-		"EXISTS":  c.handleExists,
-		"KEYS":    c.handleKeys,
-		"SELECT":  c.handleSelect,
-		"INCR":    c.handleIncr,
-		"DECR":    c.handleDecr,
-		"HSET":    c.handleHSet,
-		"HGET":    c.handleHGet,
-		"HDEL":    c.handleHDel,
-		"HGETALL": c.handleHGetAll,
-		"HKEYS":   c.handleHKeys,
-		"HLEN":    c.handleHLen,
-		"HEXISTS": c.handleHExists,
-		"LPUSH":   c.handleLPush,
-		"LPOP":    c.handleLPop,
-		"LRANGE":  c.handleLRange,
+	c.redisCommands = map[string]redisCommandcmdr{
+		"PING":    c.cmdPing,
+		"SET":     c.cmdSet,
+		"SETNX":   c.cmdSetNX,
+		"GET":     c.cmdGet,
+		"MGET":    c.cmdMGet,
+		"MSET":    c.cmdMSet,
+		"DEL":     c.cmdDel,
+		"EXISTS":  c.cmdExists,
+		"KEYS":    c.cmdKeys,
+		"SELECT":  c.cmdSelect,
+		"INCR":    c.cmdIncr,
+		"DECR":    c.cmdDecr,
+		"HSET":    c.cmdHSet,
+		"HGET":    c.cmdHGet,
+		"HDEL":    c.cmdHDel,
+		"HGETALL": c.cmdHGetAll,
+		"HKEYS":   c.cmdHKeys,
+		"HLEN":    c.cmdHLen,
+		"HEXISTS": c.cmdHExists,
+		"LPUSH":   c.cmdLPush,
+		"LPOP":    c.cmdLPop,
+		"LRANGE":  c.cmdLRange,
 	}
 
 	return c
 }
 
-func (c *command) Execute(reader *bufio.Reader) (string, error) {
-	input, err := reader.ReadString(redisCommandDelimiter)
+func (c *Command) Execute(reader *bufio.Reader) (string, error) {
+	input, err := reader.ReadString(redisLF)
 
 	if err != nil {
 		return "", err
@@ -94,8 +69,8 @@ func (c *command) Execute(reader *bufio.Reader) (string, error) {
 	input = strings.TrimSpace(input)
 
 	// Check if it's a RESP Array
-	if !strings.HasPrefix(input, redisRESPCommandPrefix) {
-		return redisCommandNop, ErrInvalidCommand
+	if !strings.HasPrefix(input, redisArrayPrefix) {
+		return redisNOP, ErrInvalidCommand
 	}
 
 	currentStorage := c.storage
@@ -103,47 +78,47 @@ func (c *command) Execute(reader *bufio.Reader) (string, error) {
 	currentStorage.Lock()
 	defer currentStorage.Unlock()
 
-	response, err := c.handleRESPCommand(reader, input)
+	response, err := c.cmdRESPCommand(reader, input)
 	if err != nil {
-		return redisCommandNop, err
+		return redisNOP, err
 	}
 
 	return response, nil
 }
 
-// handleRESPCommand processes RESP commands like SET, GET, PING, etc.
-func (c *command) handleRESPCommand(reader *bufio.Reader, input string) (string, error) {
+// cmdRESPCommand processes RESP commands like SET, GET, PING, etc.
+func (c *Command) cmdRESPCommand(reader *bufio.Reader, input string) (string, error) {
 	// Parse the array length
 	arrayLength, err := strconv.Atoi(input[1:])
 	if err != nil || arrayLength <= 0 {
-		return redisCommandNop, ErrInvalidCommand
+		return redisNOP, ErrInvalidCommand
 	}
 
 	// Read each part of the array (command and arguments)
 	var commandParts []string
 	for i := 0; i < arrayLength; i++ {
 		// Read the bulk string header (e.g., $3 for "SET")
-		line, err := reader.ReadString(redisCommandDelimiter)
-		if err != nil {
-			return redisCommandNop, ErrInvalidBulkData
+		line, errRead := reader.ReadString(redisLF)
+		if errRead != nil {
+			return redisNOP, ErrInvalidBulkData
 		}
 		line = strings.TrimSpace(line)
 
 		// Make sure it starts with '$'
-		if !strings.HasPrefix(line, redisCommandPrefix) {
-			return redisCommandNop, ErrInvalidBulkData
+		if !strings.HasPrefix(line, redisbulkStringPrefix) {
+			return redisNOP, ErrInvalidBulkData
 		}
 
 		// Read the bulk string length
-		length, err := strconv.Atoi(line[1:])
-		if err != nil || length <= 0 {
-			return redisCommandNop, ErrInvalidBulkData
+		length, errAtoi := strconv.Atoi(line[1:])
+		if errAtoi != nil || length <= 0 {
+			return redisNOP, ErrInvalidBulkData
 		}
 
 		// Read the actual bulk string data
-		bulkString, err := reader.ReadString(redisCommandDelimiter)
-		if err != nil {
-			return redisCommandNop, ErrInvalidBulkData
+		bulkString, errRead := reader.ReadString(redisLF)
+		if errRead != nil {
+			return redisNOP, ErrInvalidBulkData
 		}
 		bulkString = strings.TrimSpace(bulkString)
 
@@ -155,356 +130,420 @@ func (c *command) handleRESPCommand(reader *bufio.Reader, input string) (string,
 
 	cmd, ok := c.redisCommands[strings.ToUpper(commandParts[0])]
 	if !ok {
-		return redisCommandNop, ErrCommandNotSupported
+		return redisNOP, ErrCommandNotSupported
 	}
 
-	return cmd(commandParts[1:]...)
+	ctx, cancel := context.WithTimeout(context.Background(), c.natsTimeout)
+	defer cancel()
+
+	return cmd(ctx, commandParts[1:]...)
 }
 
-// handlePing responds with a PONG message.
-func (c *command) handlePing(args ...string) (string, error) {
-	return redisCommandPong, nil
+// cmdPing responds with a PONG message.
+func (c *Command) cmdPing(_ context.Context, _ ...string) (string, error) {
+	return redisPong, nil
 }
 
-// handleSet stores the key-value pair using the provided storage.
-// supported options: NX, XX
-func (c *command) handleSet(args ...string) (string, error) {
+// cmdSet stores the key-value pair using the provided storage.
+// supported options: XX
+func (c *Command) cmdSet(ctx context.Context, args ...string) (string, error) {
 	if len(args) < 2 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key, value := args[0], args[1]
 
 	options := []nats.Option{}
-	for i := 2; i < len(args); i += 1 {
+	for i := 2; i < len(args); i++ {
 		option := strings.ToUpper(args[i])
-		if natsOption, ok := redisOptionToNatsOption[option]; ok {
-			options = append(options, natsOption)
+		natsOption, ok := redisOptionToNatsOption[option]
+		if !ok {
+			return redisNOP, ErrCommandNotSupported
 		}
+
+		options = append(options, natsOption)
 	}
 
-	err := c.storage.Set(key, value, options...)
-	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
-		return redisCommandNil, nil
-	} else if err != nil {
-		return redisCommandNop, ErrCmdFailed
+	found := true
+	if len(options) >= 0 {
+		exists, errExists := c.storage.Exists(ctx, key)
+		if errExists != nil {
+			return redisNOP, ErrCmdFailed
+		}
+		found = exists == 1
 	}
 
-	return redisCommandOk, nil
-}
-
-// handleMSet stores the key-value pairs using the provided storage.
-func (c *command) handleMSet(args ...string) (string, error) {
-	if len(args)%2 != 0 {
-		return redisCommandNop, ErrWrongNumArgs
+	if slices.Index(options, nats.OptionSetXX) != -1 && !found {
+		return redisNil, nil
 	}
 
-	err := c.storage.MSet(args...)
+	err := c.storage.Set(ctx, key, value)
 	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisCommandOk, nil
+	return redisOK, nil
 }
 
-// handleGet retrieves the value for the given key using the provided storage.
-func (c *command) handleGet(args ...string) (string, error) {
+// cmdSetNX stores the key-value pair using the provided storage only if the key does not exist.
+func (c *Command) cmdSetNX(ctx context.Context, args ...string) (string, error) {
+	if len(args) != 2 {
+		return redisNOP, ErrWrongNumArgs
+	}
+
+	key, value := args[0], args[1]
+
+	exists, errExists := c.storage.Exists(ctx, key)
+	if errExists != nil {
+		return redisNOP, ErrCmdFailed
+	}
+
+	if exists == 1 {
+		return redisNil, nil
+	}
+
+	err := c.storage.Set(ctx, key, value)
+	if err != nil {
+		return redisNOP, ErrCmdFailed
+	}
+
+	return redisOK, nil
+}
+
+// cmdMSet stores the key-value pairs using the provided storage.
+func (c *Command) cmdMSet(ctx context.Context, args ...string) (string, error) {
+	if len(args)%2 != 0 {
+		return redisNOP, ErrWrongNumArgs
+	}
+
+	err := c.storage.MSet(ctx, args...)
+	if err != nil {
+		return redisNOP, ErrCmdFailed
+	}
+
+	return redisOK, nil
+}
+
+// cmdGet retrieves the value for the given key using the provided storage.
+func (c *Command) cmdGet(ctx context.Context, args ...string) (string, error) {
 	if len(args) != 1 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key := args[0]
-	value, err := c.storage.Get(key)
+	value, err := c.storage.Get(ctx, key)
 	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
-		return redisCommandNil, nil
+		return redisNotFound, nil
 	} else if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisString(value), nil
+	return fmtSimpleString(value), nil
 }
 
-// handleMGet retrieves the values for the given keys using the provided storage.
-func (c *command) handleMGet(args ...string) (string, error) {
+// cmdMGet retrieves the values for the given keys using the provided storage.
+func (c *Command) cmdMGet(ctx context.Context, args ...string) (string, error) {
 	if len(args) == 0 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
-	values, err := c.storage.MGet(args...)
+	values, err := c.storage.MGet(ctx, args...)
 	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisStringArray(values...), nil
+	return fmtArrayOfString(values...), nil
 }
 
-// handleDel removes the key-value pair for the given key using the provided storage.
-func (c *command) handleDel(args ...string) (string, error) {
-	deletedKeys, err := c.storage.Del(args...)
+// cmdDel removes the key-value pair for the given key using the provided storage.
+func (c *Command) cmdDel(ctx context.Context, args ...string) (string, error) {
+	deletedKeys, err := c.storage.Del(ctx, args...)
 	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisInt(deletedKeys), nil
+	return fmtInt(deletedKeys), nil
 }
 
-// handleExists checks if the given key exists in the storage.
-func (c *command) handleExists(args ...string) (string, error) {
-	exists, err := c.storage.Exists(args...)
+// cmdExists checks if the given key exists in the storage.
+func (c *Command) cmdExists(ctx context.Context, args ...string) (string, error) {
+	exists, err := c.storage.Exists(ctx, args...)
 	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisInt(exists), nil
+	return fmtInt(exists), nil
 }
 
-// handleKeys retrieves all keys in the storage.
-func (c *command) handleKeys(args ...string) (string, error) {
-	pattern := "*"
+// cmdKeys retrieves all keys in the storage.
+func (c *Command) cmdKeys(ctx context.Context, args ...string) (string, error) {
+	pattern := defaultKeysPattern
 	if len(args) > 0 {
 		pattern = args[0]
 	}
 
-	keys, err := c.storage.Keys(pattern)
+	keys, err := c.storage.Keys(ctx, pattern)
 	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	if len(keys) == 0 {
-		return redisCommandNil, nil
-	}
-
-	return redisStringArray(keys...), nil
+	return fmtArrayOfString(keys...), nil
 }
 
-// handleIncr increments the value for the given key.
-func (c *command) handleIncr(args ...string) (string, error) {
+// cmdIncr increments the value for the given key.
+func (c *Command) cmdIncr(ctx context.Context, args ...string) (string, error) {
 	if len(args) != 1 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key := args[0]
-	value, err := c.storage.Incr(key)
+	value, err := c.storage.Incr(ctx, key)
 	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisInt(value), nil
+	return fmtInt(value), nil
 }
 
-// handleDecr decrements the value for the given key.
-func (c *command) handleDecr(args ...string) (string, error) {
+// cmdDecr decrements the value for the given key.
+func (c *Command) cmdDecr(ctx context.Context, args ...string) (string, error) {
 	if len(args) != 1 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key := args[0]
-	value, err := c.storage.Decr(key)
+	value, err := c.storage.Decr(ctx, key)
 	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisInt(value), nil
+	return fmtInt(value), nil
 }
 
-// handleHSet stores the key-value pair in a hash using the provided storage.
-func (c *command) handleHSet(args ...string) (string, error) {
+// cmdHSet stores the key-value pair in a hash using the provided storage.
+func (c *Command) cmdHSet(ctx context.Context, args ...string) (string, error) {
 	if (len(args)-1)%2 != 0 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key := args[0]
 	fieldsValues := args[1:]
 
-	added, err := c.storage.HSet(key, fieldsValues...)
+	added, err := c.storage.HSet(ctx, key, fieldsValues...)
 	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisInt(added), nil
+	return fmtInt(added), nil
 }
 
-// handleHGet retrieves the value for the given field in a hash using the provided storage.
-func (c *command) handleHGet(args ...string) (string, error) {
+// cmdHGet retrieves the value for the given field in a hash using the provided storage.
+func (c *Command) cmdHGet(ctx context.Context, args ...string) (string, error) {
 	if len(args) != 2 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key, field := args[0], args[1]
-	value, err := c.storage.HGet(key, field)
+	value, err := c.storage.HGet(ctx, key, field)
 	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
-		return redisCommandNil, nil
+		// return redisNotFound, ErrCmdFailed
+		return redisNotFound, ErrCmdFailed
 	} else if err != nil && errors.Is(err, nats.ErrFieldNotFound) {
-		return redisCommandNil, nil
+		// return redisNotFound, ErrCmdFailed
+		return redisNotFound, ErrCmdFailed
 	} else if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisString(value), nil
+	return fmtBulkString(value), nil
 }
 
-// handleHDel removes the field from a hash using the provided storage.
-func (c *command) handleHDel(args ...string) (string, error) {
+// cmdHDel removes the field from a hash using the provided storage.
+func (c *Command) cmdHDel(ctx context.Context, args ...string) (string, error) {
 	if len(args) < 2 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key := args[0]
 	fields := args[1:]
 
-	deleted, err := c.storage.HDel(key, fields...)
-	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+	deleted, err := c.storage.HDel(ctx, key, fields...)
+	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
+		deleted = 0
+	} else if err != nil {
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisInt(deleted), nil
+	return fmtInt(deleted), nil
 }
 
-// handleHGetAll retrieves all fields and values from a hash using the provided storage.
-func (c *command) handleHGetAll(args ...string) (string, error) {
+// cmdHGetAll retrieves all fields and values from a hash using the provided storage.
+func (c *Command) cmdHGetAll(ctx context.Context, args ...string) (string, error) {
 	if len(args) != 1 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
+	}
+
+	fieldsValues := []string{}
+	key := args[0]
+	hash, err := c.storage.HGetAll(ctx, key)
+	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
+		fieldsValues = []string{}
+	} else if err != nil {
+		return redisNOP, ErrCmdFailed
+	}
+
+	for field, value := range hash {
+		fieldsValues = append(fieldsValues, field, value)
+	}
+
+	return fmtArrayOfString(fieldsValues...), nil
+}
+
+// cmdHKeys retrieves all fields from a hash using the provided storage.
+func (c *Command) cmdHKeys(ctx context.Context, args ...string) (string, error) {
+	if len(args) != 1 {
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key := args[0]
-	fieldsValues, err := c.storage.HGetAll(key)
+	fields, err := c.storage.HKeys(ctx, key)
 	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
-		return redisCommandNil, nil
+		fields = []string{}
 	} else if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		fields = []string{}
 	}
 
-	return redisStringArray(fieldsValues...), nil
+	return fmtArrayOfString(fields...), nil
 }
 
-// handleHKeys retrieves all fields from a hash using the provided storage.
-func (c *command) handleHKeys(args ...string) (string, error) {
+// cmdHLen retrieves the number of fields in a hash using the provided storage.
+func (c *Command) cmdHLen(ctx context.Context, args ...string) (string, error) {
 	if len(args) != 1 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key := args[0]
-	fields, err := c.storage.HKeys(key)
+	length, err := c.storage.HLen(ctx, key)
 	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
-		return redisCommandNil, nil
+		length = 0
 	} else if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisStringArray(fields...), nil
+	return fmtInt(length), nil
 }
 
-// handleHLen retrieves the number of fields in a hash using the provided storage.
-func (c *command) handleHLen(args ...string) (string, error) {
-	if len(args) != 1 {
-		return redisCommandNop, ErrWrongNumArgs
-	}
-
-	key := args[0]
-	length, err := c.storage.HLen(key)
-	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
-		return redisCommandNil, nil
-	} else if err != nil {
-		return redisCommandNop, ErrCmdFailed
-	}
-
-	return redisInt(length), nil
-}
-
-// handleHExists checks if the field exists in a hash using the provided storage.
-func (c *command) handleHExists(args ...string) (string, error) {
+// cmdHExists checks if the field exists in a hash using the provided storage.
+func (c *Command) cmdHExists(ctx context.Context, args ...string) (string, error) {
 	if len(args) != 2 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key, field := args[0], args[1]
-	exists, err := c.storage.HExists(key, field)
+	exists, err := c.storage.HExists(ctx, key, field)
 	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
-		return redisCommandNil, nil
+		exists = false
 	} else if err != nil && errors.Is(err, nats.ErrFieldNotFound) {
-		return redisCommandNil, nil
+		exists = false
 	} else if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisInt(exists), nil
+	if !exists {
+		return fmtInt(0), nil
+	}
+
+	return fmtInt(1), nil
 }
 
-// handleLPush prepends the value to the list stored at the key using the provided storage.
-func (c *command) handleLPush(args ...string) (string, error) {
+// cmdLPush prepends the value to the list stored at the key using the provided storage.
+func (c *Command) cmdLPush(ctx context.Context, args ...string) (string, error) {
 	if len(args) < 2 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key := args[0]
 	values := args[1:]
 
-	length, err := c.storage.LPush(key, values...)
+	length, err := c.storage.LPush(ctx, key, values...)
 	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisInt(length), nil
+	return fmtInt(length), nil
 }
 
-// handleLPop removes and returns the first element of the list stored at the key using the provided storage.
-func (c *command) handleLPop(args ...string) (string, error) {
-	if len(args) != 1 {
-		return redisCommandNop, ErrWrongNumArgs
+// cmdLPop removes and returns the first element of the list stored at the key using the provided storage.
+func (c *Command) cmdLPop(ctx context.Context, args ...string) (string, error) {
+	if len(args) > 2 {
+		return redisNOP, ErrWrongNumArgs
 	}
 
+	var err error
 	key := args[0]
-	value, err := c.storage.LPop(key)
-	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
-		return redisCommandNil, nil
-	} else if err != nil {
-		return redisCommandNop, ErrCmdFailed
+	count := 1
+	if len(args) == 2 {
+		count, err = strconv.Atoi(args[1])
+		if err != nil {
+			return redisNOP, ErrCmdFailed
+		}
 	}
 
-	return redisString(value), nil
+	values, err := c.storage.LPop(ctx, key, count)
+	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
+		return redisNotFound, nil
+	} else if err != nil {
+		return redisNOP, ErrCmdFailed
+	}
+
+	if len(args) == 1 {
+		return fmtBulkString(values[0]), nil
+	}
+
+	return fmtArrayOfString(values...), nil
 }
 
-// handleLRange retrieves the elements of the list stored at the key using the provided storage.
-func (c *command) handleLRange(args ...string) (string, error) {
+// cmdLRange retrieves the elements of the list stored at the key using the provided storage.
+func (c *Command) cmdLRange(ctx context.Context, args ...string) (string, error) {
 	if len(args) != 3 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	key := args[0]
 	start, err := strconv.Atoi(args[1])
 	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
 	stop, err := strconv.Atoi(args[2])
 	if err != nil {
-		return redisCommandNop, ErrCmdFailed
+		return redisNOP, ErrCmdFailed
 	}
 
-	values, err := c.storage.LRange(key, start, stop)
-	if err != nil {
-		return redisCommandNop, ErrCmdFailed
-	} else if len(values) == 0 {
-		return redisCommandNil, nil
+	values, err := c.storage.LRange(ctx, key, start, stop)
+	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
+		values = []string{}
+	} else if err != nil {
+		return redisNOP, ErrCmdFailed
 	}
 
-	return redisStringArray(values...), nil
+	return fmtArrayOfString(values...), nil
 }
 
-// handleSelect switches the active database to the given ID.
-func (c *command) handleSelect(args ...string) (string, error) {
+// cmdSelect switches the active database to the given ID.
+func (c *Command) cmdSelect(_ context.Context, args ...string) (string, error) {
 	if len(args) != 1 {
-		return redisCommandNop, ErrWrongNumArgs
+		return redisNOP, ErrWrongNumArgs
 	}
 
 	dbID := args[0]
 
 	dbIDAsInt, err := strconv.Atoi(dbID)
 	if err != nil || dbIDAsInt < 0 || dbIDAsInt >= len(c.storagePool) {
-		return redisCommandNop, ErrInvalidDB
+		return redisNOP, ErrInvalidDB
 	}
 
 	c.storage = c.storagePool[dbIDAsInt]
 
-	return redisCommandOk, nil
+	return redisOK, nil
 }

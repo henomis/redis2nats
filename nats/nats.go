@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
-	"time"
 
 	nc "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -18,7 +17,6 @@ import (
 type KV struct {
 	m         sync.Mutex
 	url       string
-	timeout   time.Duration
 	bucket    string
 	conn      *nc.Conn
 	jetstream jetstream.JetStream
@@ -27,12 +25,11 @@ type KV struct {
 }
 
 // New creates a new NATS JetStream key-value store
-func New(url string, bucket string, timeout time.Duration) *KV {
+func New(url string, bucket string) *KV {
 	return &KV{
-		timeout: timeout,
-		url:     url,
-		bucket:  bucket,
-		log:     slog.Default().With("module", "nats-kv"),
+		url:    url,
+		bucket: bucket,
+		log:    slog.Default().With("module", "nats-kv"),
 	}
 }
 
@@ -94,37 +91,15 @@ func (n *KV) Unlock() {
 }
 
 // Set sets a key-value pair in the key-value store
-func (n *KV) Set(key, value string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
-	setKeyIfNoExist := isOptionEnabled(OptionSetNX, args)
-	setKeyIfExists := isOptionEnabled(OptionSetXX, args)
-
-	var err error
-	exists := 0
-	if setKeyIfNoExist || setKeyIfExists {
-		exists, err = n.Exists(key)
-		if err != nil {
-			return err
-		}
-	}
-
-	if setKeyIfNoExist && exists == 1 {
-		return nil
-	} else if setKeyIfExists && exists == 0 {
-		return ErrKeyNotFound
-	}
-
-	_, err = n.store.Put(ctx, key, []byte(value))
-
+func (n *KV) Set(ctx context.Context, key, value string) error {
+	_, err := n.store.Put(ctx, key, []byte(value))
 	return err
 }
 
 // MSet sets multiple key-value pairs in the key-value store
-func (n *KV) MSet(args ...string) error {
+func (n *KV) MSet(ctx context.Context, args ...string) error {
 	for i := 0; i < len(args); i += 2 {
-		err := n.Set(args[i], args[i+1])
+		err := n.Set(ctx, args[i], args[i+1])
 		if err != nil {
 			return err
 		}
@@ -134,10 +109,7 @@ func (n *KV) MSet(args ...string) error {
 }
 
 // Get gets the value for a key in the key-value store
-func (n *KV) Get(key string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) Get(ctx context.Context, key string) (string, error) {
 	entry, err := n.store.Get(ctx, key)
 	if err != nil && errors.Is(err, jetstream.ErrKeyNotFound) {
 		return "", ErrKeyNotFound
@@ -148,10 +120,7 @@ func (n *KV) Get(key string) (string, error) {
 }
 
 // MGet gets the values for multiple keys in the key-value store
-func (n *KV) MGet(keys ...string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) MGet(ctx context.Context, keys ...string) ([]string, error) {
 	var natsKeys []string
 	for _, key := range keys {
 		entry, err := n.store.Get(ctx, key)
@@ -169,14 +138,16 @@ func (n *KV) MGet(keys ...string) ([]string, error) {
 }
 
 // Del deletes a key from the key-value store
-func (n *KV) Del(keys ...string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) Del(ctx context.Context, keys ...string) (int, error) {
 	deletedKeys := 0
 
 	for _, key := range keys {
-		err := n.store.Delete(ctx, key)
+		_, err := n.store.Get(ctx, key)
+		if err != nil && errors.Is(err, jetstream.ErrKeyNotFound) {
+			continue
+		}
+
+		err = n.store.Purge(ctx, key)
 		if err != nil {
 			return deletedKeys, err
 		}
@@ -187,10 +158,7 @@ func (n *KV) Del(keys ...string) (int, error) {
 }
 
 // Exists checks if a key exists in the key-value store
-func (n *KV) Exists(keys ...string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) Exists(ctx context.Context, keys ...string) (int, error) {
 	exists := 0
 	for _, key := range keys {
 		_, err := n.store.Get(ctx, key)
@@ -205,10 +173,7 @@ func (n *KV) Exists(keys ...string) (int, error) {
 }
 
 // Keys gets all keys in the key-value store
-func (n *KV) Keys(pattern string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) Keys(ctx context.Context, pattern string) ([]string, error) {
 	keys := make([]string, 0)
 
 	keyListener, err := n.store.ListKeys(ctx)
@@ -226,8 +191,8 @@ func (n *KV) Keys(pattern string) ([]string, error) {
 }
 
 // Incr increments a key in the key-value store
-func (n *KV) Incr(key string) (int, error) {
-	value, err := n.Get(key)
+func (n *KV) Incr(ctx context.Context, key string) (int, error) {
+	value, err := n.Get(ctx, key)
 	if err != nil && errors.Is(err, ErrKeyNotFound) {
 		value = "0"
 	} else if err != nil {
@@ -241,7 +206,7 @@ func (n *KV) Incr(key string) (int, error) {
 
 	valueAsInt++
 
-	err = n.Set(key, fmt.Sprintf("%d", valueAsInt))
+	err = n.Set(ctx, key, fmt.Sprintf("%d", valueAsInt))
 	if err != nil {
 		return 0, err
 	}
@@ -250,8 +215,8 @@ func (n *KV) Incr(key string) (int, error) {
 }
 
 // Decr decrements a key in the key-value store
-func (n *KV) Decr(key string) (int, error) {
-	value, err := n.Get(key)
+func (n *KV) Decr(ctx context.Context, key string) (int, error) {
+	value, err := n.Get(ctx, key)
 	if err != nil && errors.Is(err, ErrKeyNotFound) {
 		value = "0"
 	} else if err != nil {
@@ -265,7 +230,7 @@ func (n *KV) Decr(key string) (int, error) {
 
 	valueAsInt--
 
-	err = n.Set(key, fmt.Sprintf("%d", valueAsInt))
+	err = n.Set(ctx, key, fmt.Sprintf("%d", valueAsInt))
 	if err != nil {
 		return 0, err
 	}
@@ -274,15 +239,13 @@ func (n *KV) Decr(key string) (int, error) {
 }
 
 // HSet sets a field in a hash in the key-value store
-func (n *KV) HSet(key string, fieldsValues ...string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) HSet(ctx context.Context, key string, fieldsValues ...string) (int, error) {
 	hash := make(map[string]string)
 
 	entry, err := n.store.Get(ctx, key)
 	if err != nil && errors.Is(err, jetstream.ErrKeyNotFound) {
 		// do nothing
+		_ = err
 	} else if err != nil {
 		return 0, err
 	} else {
@@ -315,10 +278,7 @@ func (n *KV) HSet(key string, fieldsValues ...string) (int, error) {
 }
 
 // HGet gets the value for a field in a hash in the key-value store
-func (n *KV) HGet(key, field string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) HGet(ctx context.Context, key, field string) (string, error) {
 	hash := make(map[string]string)
 
 	entry, err := n.store.Get(ctx, key)
@@ -342,10 +302,7 @@ func (n *KV) HGet(key, field string) (string, error) {
 }
 
 // HDel deletes a field from a hash in the key-value store
-func (n *KV) HDel(key string, fields ...string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) HDel(ctx context.Context, key string, fields ...string) (int, error) {
 	hash := make(map[string]string)
 
 	entry, err := n.store.Get(ctx, key)
@@ -383,10 +340,7 @@ func (n *KV) HDel(key string, fields ...string) (int, error) {
 }
 
 // HGetAll gets all fields and values in a hash in the key-value store
-func (n *KV) HGetAll(key string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) HGetAll(ctx context.Context, key string) (map[string]string, error) {
 	hash := make(map[string]string)
 
 	entry, err := n.store.Get(ctx, key)
@@ -401,19 +355,11 @@ func (n *KV) HGetAll(key string) ([]string, error) {
 		return nil, err
 	}
 
-	var fieldsValues []string
-	for field, value := range hash {
-		fieldsValues = append(fieldsValues, field, value)
-	}
-
-	return fieldsValues, nil
+	return hash, nil
 }
 
 // HKeys gets all fields in a hash in the key-value store
-func (n *KV) HKeys(key string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) HKeys(ctx context.Context, key string) ([]string, error) {
 	hash := make(map[string]string)
 
 	entry, err := n.store.Get(ctx, key)
@@ -437,10 +383,7 @@ func (n *KV) HKeys(key string) ([]string, error) {
 }
 
 // HLen gets the number of fields in a hash in the key-value store
-func (n *KV) HLen(key string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) HLen(ctx context.Context, key string) (int, error) {
 	hash := make(map[string]string)
 
 	entry, err := n.store.Get(ctx, key)
@@ -459,42 +402,37 @@ func (n *KV) HLen(key string) (int, error) {
 }
 
 // HExists checks if a field exists in a hash in the key-value store
-func (n *KV) HExists(key, field string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) HExists(ctx context.Context, key, field string) (bool, error) {
 	hash := make(map[string]string)
 
 	entry, err := n.store.Get(ctx, key)
 	if err != nil && errors.Is(err, jetstream.ErrKeyNotFound) {
-		return 0, ErrKeyNotFound
+		return false, ErrKeyNotFound
 	} else if err != nil {
-		return 0, err
+		return false, err
 	}
 
 	err = json.Unmarshal(entry.Value(), &hash)
 	if err != nil {
-		return 0, err
+		return false, err
 	}
 
 	_, ok := hash[field]
 	if !ok {
-		return 0, ErrFieldNotFound
+		return false, ErrFieldNotFound
 	}
 
-	return 1, nil
+	return true, nil
 }
 
 // LPush pushes values to a list in the key-value store
-func (n *KV) LPush(key string, values ...string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) LPush(ctx context.Context, key string, values ...string) (int, error) {
 	list := make([]string, 0)
 
 	entry, err := n.store.Get(ctx, key)
 	if err != nil && errors.Is(err, jetstream.ErrKeyNotFound) {
 		// do nothing
+		_ = err
 	} else if err != nil {
 		return 0, err
 	} else {
@@ -522,49 +460,41 @@ func (n *KV) LPush(key string, values ...string) (int, error) {
 }
 
 // LPop pops a value from a list in the key-value store
-func (n *KV) LPop(key string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) LPop(ctx context.Context, key string, count int) ([]string, error) {
 	list := make([]string, 0)
 
-	entry, err := n.store.Get(ctx, key)
-	if err != nil && errors.Is(err, jetstream.ErrKeyNotFound) {
-		return "", ErrKeyNotFound
-	} else if err != nil {
-		return "", err
+	entry, err := n.Get(ctx, key)
+	if err != nil && errors.Is(err, ErrKeyNotFound) {
+		return nil, ErrKeyNotFound
 	}
 
-	err = json.Unmarshal(entry.Value(), &list)
+	err = json.Unmarshal([]byte(entry), &list)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	if len(list) == 0 {
-		return "", ErrKeyNotFound
+	if count > len(list) {
+		count = len(list)
 	}
 
-	value := list[0]
-	list = list[1:]
+	popped := list[:count]
+	list = list[count:]
 
 	data, err := json.Marshal(list)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	_, err = n.store.Put(ctx, key, data)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	return value, nil
+	return popped, nil
 }
 
 // LRange gets a range of values from a list in the key-value store
-func (n *KV) LRange(key string, start, stop int) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
-	defer cancel()
-
+func (n *KV) LRange(ctx context.Context, key string, start, stop int) ([]string, error) {
 	list := make([]string, 0)
 
 	entry, err := n.store.Get(ctx, key)

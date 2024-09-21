@@ -27,6 +27,7 @@ type Config struct {
 type RedisServer struct {
 	log    *slog.Logger
 	config *Config
+	stop   chan struct{}
 }
 
 // NewRedisServer creates a new RedisServer instance with the provided storage.
@@ -34,6 +35,7 @@ func NewRedisServer(c *Config) *RedisServer {
 	return &RedisServer{
 		config: c,
 		log:    slog.Default().With("module", "redis-server"),
+		stop:   make(chan struct{}),
 	}
 }
 
@@ -43,15 +45,17 @@ func (s *RedisServer) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer ln.Close()
+
 	s.log.Info(fmt.Sprintf("%s server is running", appName), "address", s.config.RedisAddress)
 
 	// Create a storage pool with the number of databases specified in the configuration.
 	storagePool := make([]*nats.KV, s.config.RedisNumDB)
 	for i := 0; i < s.config.RedisNumDB; i++ {
 		bucket := fmt.Sprintf("%s-%d", s.config.NATSBucketPrefix, i)
-		storage := nats.New(s.config.NATSURL, bucket, s.config.NATSTimeout)
-		err := storage.Connect(ctx)
-		if err != nil {
+		storage := nats.New(s.config.NATSURL, bucket)
+		errConnect := storage.Connect(ctx)
+		if errConnect != nil {
 			return err
 		}
 		storagePool[i] = storage
@@ -59,12 +63,31 @@ func (s *RedisServer) Start(ctx context.Context) error {
 	}
 
 	for {
-		conn, err := ln.Accept()
-		if err != nil {
+		conn, errAccept := ln.Accept()
+		if errAccept != nil {
 			s.log.Error("Error accepting connection", "error", err)
 			continue
 		}
 
-		go NewConnection(conn, storagePool).handle()
+		select {
+		case <-s.stop:
+			return nil
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		// nolint:contextcheck
+		go NewConnection(conn, storagePool, s.config.NATSTimeout).handle()
 	}
+}
+
+func (s *RedisServer) Stop() {
+	close(s.stop)
+	// open a connection to unlock the listener
+	ln, err := net.Dial("tcp", s.config.RedisAddress)
+	if err != nil {
+		s.log.Error("Error unlocking listener", "error", err)
+	}
+	defer ln.Close()
 }

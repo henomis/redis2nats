@@ -1,6 +1,7 @@
 package nats
 
 // matchPattern checks if the string 's' matches the pattern 'pattern'.
+// nolint: gocognit,nestif,cyclop
 func matchPattern(s string, pattern string) bool {
 	si, pi := 0, 0
 	sLen, pLen := len(s), len(pattern)
@@ -35,6 +36,7 @@ func matchPattern(s string, pattern string) bool {
 					pi++
 				}
 
+				// nolint: wastedassign
 				matched := false
 				inRange := false
 				for pi < pLen && pattern[pi] != ']' {
