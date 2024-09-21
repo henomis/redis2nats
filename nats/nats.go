@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"time"
 
 	nc "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -15,21 +16,26 @@ import (
 
 // KV is a simple key-value store backed by NATS JetStream
 type KV struct {
-	m         sync.Mutex
-	url       string
-	bucket    string
-	conn      *nc.Conn
-	jetstream jetstream.JetStream
-	store     jetstream.KeyValue
-	log       *slog.Logger
+	m                sync.Mutex
+	url              string
+	bucket           string
+	expirationBucket string
+	conn             *nc.Conn
+	jetstream        jetstream.JetStream
+	store            jetstream.KeyValue
+	expirationStore  jetstream.KeyValue
+	persist          bool
+	log              *slog.Logger
 }
 
 // New creates a new NATS JetStream key-value store
-func New(url string, bucket string) *KV {
+func New(url string, bucket string, persist bool) *KV {
 	return &KV{
-		url:    url,
-		bucket: bucket,
-		log:    slog.Default().With("module", "nats-kv"),
+		url:              url,
+		bucket:           bucket,
+		expirationBucket: "EXP-" + bucket,
+		persist:          persist,
+		log:              slog.Default().With("module", "nats-kv"),
 	}
 }
 
@@ -52,7 +58,12 @@ func (n *KV) Connect(ctx context.Context) error {
 
 	n.jetstream = js
 
-	return n.storage(ctx)
+	err = n.storage(ctx)
+	if err != nil {
+		return err
+	}
+
+	return n.expirationStorage(ctx)
 }
 
 // Close closes the connection to the NATS server
@@ -65,7 +76,13 @@ func (n *KV) Close() {
 }
 
 func (n *KV) storage(ctx context.Context) error {
-	// bucket := fmt.Sprintf("%s-%s", n.bucket, n.dbId)
+	if !n.persist {
+		errDelete := n.jetstream.DeleteKeyValue(ctx, n.bucket)
+		if errDelete != nil && !errors.Is(errDelete, jetstream.ErrBucketNotFound) {
+			return errDelete
+		}
+	}
+
 	store, err := n.jetstream.CreateKeyValue(
 		ctx,
 		jetstream.KeyValueConfig{
@@ -76,9 +93,46 @@ func (n *KV) storage(ctx context.Context) error {
 		return err
 	}
 
-	n.log.Info("Switch NATS JetStream Key-Value store", "bucket", n.bucket)
+	n.log.Info("Starting NATS JetStream Key-Value store", "bucket", n.bucket)
 
 	n.store = store
+
+	return nil
+}
+
+func (n *KV) expirationStorage(ctx context.Context) error {
+	if !n.persist {
+		errDelete := n.jetstream.DeleteKeyValue(ctx, n.expirationBucket)
+		if errDelete != nil && !errors.Is(errDelete, jetstream.ErrBucketNotFound) {
+			return errDelete
+		}
+	}
+
+	store, err := n.jetstream.CreateKeyValue(
+		ctx,
+		jetstream.KeyValueConfig{
+			Bucket: n.expirationBucket,
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	n.log.Info("Starting NATS JetStream Key-Value store", "bucket", n.expirationBucket)
+
+	n.expirationStore = store
+
+	go func(ctx context.Context) {
+		n.log.Info("Starting expiration check", "bucket", n.expirationBucket)
+		for {
+			err := n.checkExpiration(ctx)
+			if err != nil {
+				break
+			}
+			<-time.After(1 * time.Second)
+		}
+	}(ctx)
+
 	return nil
 }
 
@@ -535,4 +589,89 @@ func (n *KV) LRange(ctx context.Context, key string, start, stop int) ([]string,
 
 	// Return the sliced portion (start to stop inclusive)
 	return list[start : stop+1], nil
+}
+
+func (n *KV) Expire(ctx context.Context, key string, ttl time.Duration) error {
+	_, err := n.Get(ctx, key)
+	if err != nil && errors.Is(err, ErrKeyNotFound) {
+		return ErrKeyNotFound
+	} else if err != nil {
+		return err
+	}
+
+	expirationTime := time.Now().Add(ttl).Unix()
+
+	n.log.Info("Setting expiration", "key", key, "expiration", expirationTime)
+	_, err = n.expirationStore.Put(ctx, key, []byte(fmt.Sprintf("%d", expirationTime)))
+	return err
+}
+
+func (n *KV) TTL(ctx context.Context, key string) (int64, error) {
+	exists, err := n.Exists(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+
+	if exists == 0 {
+		return 0, ErrKeyNotFound
+	}
+
+	entry, err := n.expirationStore.Get(ctx, key)
+	if err != nil && errors.Is(err, jetstream.ErrKeyNotFound) {
+		return 0, ErrExpKeyNotFound
+	} else if err != nil {
+		return 0, err
+	}
+
+	expirationTime, err := strconv.ParseInt(string(entry.Value()), 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return (expirationTime - time.Now().Unix()), nil
+}
+
+func (n *KV) checkExpiration(ctx context.Context) error {
+	watcher, err := n.expirationStore.WatchAll(ctx)
+	if err != nil {
+		return err
+	}
+	defer watcher.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case event := <-watcher.Updates():
+			if event == nil {
+				return nil
+			}
+
+			key := event.Key()
+
+			expirationTime, err := strconv.ParseInt(string(event.Value()), 10, 64)
+			if err != nil {
+				continue
+			}
+
+			if time.Now().Unix() >= expirationTime {
+				n.Lock()
+
+				n.log.Info("Key expired", "key", key)
+				err := n.store.Purge(ctx, key)
+				if err != nil {
+					n.Unlock()
+					continue
+				}
+
+				err = n.expirationStore.Purge(ctx, key)
+				if err != nil {
+					n.Unlock()
+					continue
+				}
+
+				n.Unlock()
+			}
+		}
+	}
 }

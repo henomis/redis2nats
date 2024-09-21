@@ -178,6 +178,20 @@ func main() {
 	}
 	fmt.Printf("Values in list: %v\n", values)
 
+	// EXPIRE
+	expireRes, err := rdb.Expire(ctx, "myotherkey", 10).Result()
+	if err != nil {
+		log.Fatalf("Could not set expiration for key in Redis: %v", err)
+	}
+	fmt.Printf("Key 'myotherkey' expiration set: %t\n", expireRes)
+
+	// TTL
+	ttl, err := rdb.TTL(ctx, "myotherkey").Result()
+	if err != nil {
+		log.Fatalf("Could not get TTL for key in Redis: %v", err)
+	}
+	fmt.Printf("Key 'myotherkey' TTL: %v\n", ttl)
+
 	// Close the Redis connection
 	err = rdb.Close()
 	if err != nil {

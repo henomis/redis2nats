@@ -48,6 +48,7 @@ func main() {
 	viper.SetDefault("nats.url", "nats://localhost:4222")
 	viper.SetDefault("nats.bucketPrefix", "redisnats")
 	viper.SetDefault("nats.timeout", 10*time.Second)
+	viper.SetDefault("nats.persist", false)
 	viper.SetDefault("redis.address", ":6379")
 	viper.SetDefault("redis.numDB", 16)
 
@@ -55,6 +56,7 @@ func main() {
 	natsURL := viper.GetString("nats.url")
 	natsBucketPrefix := viper.GetString("nats.bucketPrefix")
 	natsTimeout := viper.GetDuration("nats.timeout")
+	natsPersist := viper.GetBool("nats.persist")
 	redisURL := viper.GetString("redis.address")
 	redisNumDB := viper.GetInt("redis.numDB")
 
@@ -64,6 +66,7 @@ func main() {
 			NATSURL:          natsURL,
 			NATSTimeout:      natsTimeout,
 			NATSBucketPrefix: natsBucketPrefix,
+			NATSPersist:      natsPersist,
 			RedisAddress:     redisURL,
 			RedisNumDB:       redisNumDB,
 		},

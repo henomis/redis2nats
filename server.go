@@ -19,6 +19,7 @@ type Config struct {
 	NATSURL          string
 	NATSTimeout      time.Duration
 	NATSBucketPrefix string
+	NATSPersist      bool
 	RedisAddress     string
 	RedisNumDB       int
 }
@@ -53,10 +54,10 @@ func (s *RedisServer) Start(ctx context.Context) error {
 	storagePool := make([]*nats.KV, s.config.RedisNumDB)
 	for i := 0; i < s.config.RedisNumDB; i++ {
 		bucket := fmt.Sprintf("%s-%d", s.config.NATSBucketPrefix, i)
-		storage := nats.New(s.config.NATSURL, bucket)
+		storage := nats.New(s.config.NATSURL, bucket, s.config.NATSPersist)
 		errConnect := storage.Connect(ctx)
 		if errConnect != nil {
-			return err
+			return errConnect
 		}
 		storagePool[i] = storage
 		defer storage.Close()

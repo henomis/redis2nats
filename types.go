@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/henomis/redis2nats/nats"
 )
 
 type redisCommand = string
@@ -18,10 +16,14 @@ const (
 	redisNOP              redisCommand = ""
 	redisNotFound         redisCommand = "_\r\n"
 	defaultKeysPattern    redisCommand = "*"
+)
 
-	// redisMapsPrefix       = "%"
+type Option = string
 
-	// redisCommandNil  redisCommand = "-1"
+const (
+	optionSetXX Option = "XX"
+	optionSetNX Option = "NX"
+	optionSetEX Option = "EX"
 )
 
 var (
@@ -29,18 +31,6 @@ var (
 	redisOK   = fmtSimpleString("OK")
 	redisNil  = fmtNullBulkString()
 )
-
-type redisOption = string
-
-const (
-	redisOptionSetXX redisOption = "XX"
-	redisOptionSetNX redisOption = "NX"
-)
-
-var redisOptionToNatsOption = map[redisOption]nats.Option{
-	redisOptionSetXX: nats.OptionSetXX,
-	// redisOptionSetNX: nats.OptionSetNX,
-}
 
 func fmtSimpleString(value string) string {
 	return fmt.Sprintf("+%s%s", value, redisCRLF)
@@ -51,6 +41,10 @@ func fmtSimpleError(value string) string {
 }
 
 func fmtInt(value int) string {
+	return fmt.Sprintf(":%d%s", value, redisCRLF)
+}
+
+func fmtInt64(value int64) string {
 	return fmt.Sprintf(":%d%s", value, redisCRLF)
 }
 

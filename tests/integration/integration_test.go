@@ -34,9 +34,9 @@ func (suite *IntegrationTestSuite) SetupTest() {
 	suite.NoError(compose.Up(ctx, tc.Wait(true)), "compose.Up()")
 
 	redisClient := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379", // Redis server address (localhost and default Redis port)
-		Password: "",               // No password set
-		DB:       0,                // Use default DB
+		Addr:     "0.0.0.0:6379", // Redis server address (localhost and default Redis port)
+		Password: "",             // No password set
+		DB:       0,              // Use default DB
 	})
 
 	suite.T().Cleanup(func() {
@@ -46,9 +46,10 @@ func (suite *IntegrationTestSuite) SetupTest() {
 	// Create and start the fake Redis server using environment variable for Redis URL
 	redisServer := redisnats.NewRedisServer(
 		&redisnats.Config{
-			NATSURL:          "nats://localhost:4222",
+			NATSURL:          "nats://0.0.0.0:4222",
 			NATSTimeout:      10 * time.Second,
 			NATSBucketPrefix: "test",
+			NATSPersist:      false,
 			RedisAddress:     ":6400",
 			RedisNumDB:       16,
 		},
@@ -66,9 +67,9 @@ func (suite *IntegrationTestSuite) SetupTest() {
 	})
 
 	redis2natsClient := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6400", // Redis server address (localhost and default Redis port)
-		Password: "",               // No password set
-		DB:       0,                // Use default DB
+		Addr:     "0.0.0.0:6400", // Redis server address (localhost and default Redis port)
+		Password: "",             // No password set
+		DB:       0,              // Use default DB
 	})
 
 	suite.T().Cleanup(func() {
@@ -175,6 +176,123 @@ func (suite *IntegrationTestSuite) TestSetNX() {
 	suite.NoError(err)
 
 	suite.Equal(setnxRedisResult, setnxRedis2natsResult)
+}
+
+func (suite *IntegrationTestSuite) TestSetEX() {
+	ctx, cancel := context.WithCancel(context.Background())
+	suite.T().Cleanup(cancel)
+
+	// Test SET
+	setRedisResult, err := suite.redisClient.Set(ctx, "key", "value", 2*time.Second).Result()
+	suite.NoError(err)
+
+	setRedis2natsResult, err := suite.redis2natsClient.Set(ctx, "key", "value", 2*time.Second).Result()
+	suite.NoError(err)
+
+	suite.Equal(setRedisResult, setRedis2natsResult)
+
+	<-time.After(3 * time.Second)
+
+	// Test SET with different value
+	setRedisResult, err = suite.redisClient.Get(ctx, "key").Result()
+	suite.Error(err)
+
+	setRedis2natsResult, err = suite.redis2natsClient.Get(ctx, "key").Result()
+	suite.Error(err)
+
+	suite.Equal(setRedisResult, setRedis2natsResult)
+}
+
+func (suite *IntegrationTestSuite) TestTTL() {
+	ctx, cancel := context.WithCancel(context.Background())
+	suite.T().Cleanup(cancel)
+
+	// Test SET
+	setRedisResult, err := suite.redisClient.Set(ctx, "key", "value", 3*time.Second).Result()
+	suite.NoError(err)
+
+	setRedis2natsResult, err := suite.redis2natsClient.Set(ctx, "key", "value", 3*time.Second).Result()
+	suite.NoError(err)
+
+	suite.Equal(setRedisResult, setRedis2natsResult)
+
+	<-time.After(2 * time.Second)
+
+	// Test TTL
+	ttlRedisResult, err := suite.redisClient.TTL(ctx, "key").Result()
+	suite.NoError(err)
+
+	ttlRedis2natsResult, err := suite.redis2natsClient.TTL(ctx, "key").Result()
+	suite.NoError(err)
+
+	suite.Equal(ttlRedisResult, ttlRedis2natsResult)
+
+	<-time.After(2 * time.Second)
+
+	// Test TTL expired
+	ttlRedisResult, err = suite.redisClient.TTL(ctx, "key").Result()
+	suite.NoError(err)
+
+	ttlRedis2natsResult, err = suite.redis2natsClient.TTL(ctx, "key").Result()
+	suite.NoError(err)
+
+	suite.Equal(ttlRedisResult, ttlRedis2natsResult)
+
+	// Test TTL not exists
+	ttlRedisResult, err = suite.redisClient.TTL(ctx, "key2").Result()
+	suite.NoError(err)
+
+	ttlRedis2natsResult, err = suite.redis2natsClient.TTL(ctx, "key2").Result()
+	suite.NoError(err)
+
+	suite.Equal(ttlRedisResult, ttlRedis2natsResult)
+
+	// Test SET
+	_, err = suite.redisClient.Set(ctx, "key", "value", 0).Result()
+	suite.NoError(err)
+
+	_, err = suite.redis2natsClient.Set(ctx, "key", "value", 0).Result()
+	suite.NoError(err)
+
+	// Test TTL not expired
+	ttlRedisResult, err = suite.redisClient.TTL(ctx, "key").Result()
+	suite.NoError(err)
+
+	ttlRedis2natsResult, err = suite.redis2natsClient.TTL(ctx, "key").Result()
+	suite.NoError(err)
+
+	suite.Equal(ttlRedisResult, ttlRedis2natsResult)
+}
+
+func (suite *IntegrationTestSuite) TestExpire() {
+	ctx, cancel := context.WithCancel(context.Background())
+	suite.T().Cleanup(cancel)
+
+	// Test SET
+	_, err := suite.redisClient.Set(ctx, "key", "value", 0).Result()
+	suite.NoError(err)
+
+	_, err = suite.redis2natsClient.Set(ctx, "key", "value", 0).Result()
+	suite.NoError(err)
+
+	// Text EXPIRE
+
+	expireRedisResult, err := suite.redisClient.Expire(ctx, "key", 3*time.Second).Result()
+	suite.NoError(err)
+
+	expireRedis2natsResult, err := suite.redis2natsClient.Expire(ctx, "key", 3*time.Second).Result()
+	suite.NoError(err)
+
+	suite.Equal(expireRedisResult, expireRedis2natsResult)
+
+	// Test EXPIRE not exists
+	expireRedisResult, err = suite.redisClient.Expire(ctx, "key2", 3*time.Second).Result()
+	suite.NoError(err)
+
+	expireRedis2natsResult, err = suite.redis2natsClient.Expire(ctx, "key2", 3*time.Second).Result()
+	suite.NoError(err)
+
+	suite.Equal(expireRedisResult, expireRedis2natsResult)
 }
 
 func (suite *IntegrationTestSuite) TestGet() {

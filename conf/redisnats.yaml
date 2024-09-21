@@ -4,4 +4,5 @@ redis:
 nats:
   url: "nats://localhost:4222"
   bucketPrefix: "redisnats"
+  persist: false
   timeout: "10s"

@@ -54,6 +54,8 @@ func NewCommandExecutor(storagePool []*nats.KV, natsTimeout time.Duration) *Comm
 		"LPUSH":   c.cmdLPush,
 		"LPOP":    c.cmdLPop,
 		"LRANGE":  c.cmdLRange,
+		"TTL":     c.cmdTTL,
+		"EXPIRE":  c.cmdExpire,
 	}
 
 	return c
@@ -130,7 +132,7 @@ func (c *Command) cmdRESPCommand(reader *bufio.Reader, input string) (string, er
 
 	cmd, ok := c.redisCommands[strings.ToUpper(commandParts[0])]
 	if !ok {
-		return redisNOP, ErrCommandNotSupported
+		return redisNOP, &ErrCommandNotSupported{Command: commandParts[0]}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.natsTimeout)
@@ -145,7 +147,7 @@ func (c *Command) cmdPing(_ context.Context, _ ...string) (string, error) {
 }
 
 // cmdSet stores the key-value pair using the provided storage.
-// supported options: XX
+// supported options: XX, EX
 func (c *Command) cmdSet(ctx context.Context, args ...string) (string, error) {
 	if len(args) < 2 {
 		return redisNOP, ErrWrongNumArgs
@@ -153,19 +155,8 @@ func (c *Command) cmdSet(ctx context.Context, args ...string) (string, error) {
 
 	key, value := args[0], args[1]
 
-	options := []nats.Option{}
-	for i := 2; i < len(args); i++ {
-		option := strings.ToUpper(args[i])
-		natsOption, ok := redisOptionToNatsOption[option]
-		if !ok {
-			return redisNOP, ErrCommandNotSupported
-		}
-
-		options = append(options, natsOption)
-	}
-
 	found := true
-	if len(options) >= 0 {
+	if len(args) > 2 {
 		exists, errExists := c.storage.Exists(ctx, key)
 		if errExists != nil {
 			return redisNOP, ErrCmdFailed
@@ -173,13 +164,36 @@ func (c *Command) cmdSet(ctx context.Context, args ...string) (string, error) {
 		found = exists == 1
 	}
 
-	if slices.Index(options, nats.OptionSetXX) != -1 && !found {
+	// Convert all options to uppercase
+	for i := 2; i < len(args); i++ {
+		args[i] = strings.ToUpper(args[i])
+	}
+
+	// Check if the XX option is set and the key does not exist
+	if slices.Index(args, optionSetXX) != -1 && !found {
 		return redisNil, nil
 	}
 
 	err := c.storage.Set(ctx, key, value)
 	if err != nil {
 		return redisNOP, ErrCmdFailed
+	}
+
+	// Check if the EX option is set
+	if index := slices.Index(args, optionSetEX); index != -1 {
+		if index+1 >= len(args) {
+			return redisNOP, ErrWrongNumArgs
+		}
+
+		seconds, err := strconv.Atoi(args[index+1])
+		if err != nil {
+			return redisNOP, ErrCmdFailed
+		}
+
+		err = c.storage.Expire(ctx, key, time.Duration(seconds)*time.Second)
+		if err != nil {
+			return redisNOP, ErrCmdFailed
+		}
 	}
 
 	return redisOK, nil
@@ -528,6 +542,45 @@ func (c *Command) cmdLRange(ctx context.Context, args ...string) (string, error)
 	}
 
 	return fmtArrayOfString(values...), nil
+}
+
+func (c *Command) cmdTTL(ctx context.Context, args ...string) (string, error) {
+	if len(args) != 1 {
+		return redisNOP, ErrWrongNumArgs
+	}
+
+	key := args[0]
+	ttl, err := c.storage.TTL(ctx, key)
+	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
+		return fmtInt(-2), nil
+	} else if err != nil && errors.Is(err, nats.ErrExpKeyNotFound) {
+		return fmtInt(-1), nil
+	} else if err != nil {
+		return redisNOP, ErrCmdFailed
+	}
+
+	return fmtInt64(ttl), nil
+}
+
+func (c *Command) cmdExpire(ctx context.Context, args ...string) (string, error) {
+	if len(args) != 2 {
+		return redisNOP, ErrWrongNumArgs
+	}
+
+	key := args[0]
+	seconds, err := strconv.Atoi(args[1])
+	if err != nil {
+		return redisNOP, ErrCmdFailed
+	}
+
+	err = c.storage.Expire(ctx, key, time.Duration(seconds)*time.Second)
+	if err != nil && errors.Is(err, nats.ErrKeyNotFound) {
+		return fmtInt(0), nil
+	} else if err != nil {
+		return redisNOP, ErrCmdFailed
+	}
+
+	return fmtInt(1), nil
 }
 
 // cmdSelect switches the active database to the given ID.
