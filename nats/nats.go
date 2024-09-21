@@ -125,8 +125,8 @@ func (n *KV) expirationStorage(ctx context.Context) error {
 	go func(ctx context.Context) {
 		n.log.Info("Starting expiration check", "bucket", n.expirationBucket)
 		for {
-			err := n.checkExpiration(ctx)
-			if err != nil {
+			errExpiration := n.checkExpiration(ctx)
+			if errExpiration != nil {
 				break
 			}
 			<-time.After(1 * time.Second)
@@ -631,11 +631,13 @@ func (n *KV) TTL(ctx context.Context, key string) (int64, error) {
 	return (expirationTime - time.Now().Unix()), nil
 }
 
+// nolint:gocognit
 func (n *KV) checkExpiration(ctx context.Context) error {
 	watcher, err := n.expirationStore.WatchAll(ctx)
 	if err != nil {
 		return err
 	}
+	// nolint:errcheck
 	defer watcher.Stop()
 
 	for {
@@ -649,8 +651,8 @@ func (n *KV) checkExpiration(ctx context.Context) error {
 
 			key := event.Key()
 
-			expirationTime, err := strconv.ParseInt(string(event.Value()), 10, 64)
-			if err != nil {
+			expirationTime, errParse := strconv.ParseInt(string(event.Value()), 10, 64)
+			if errParse != nil {
 				continue
 			}
 
@@ -658,14 +660,14 @@ func (n *KV) checkExpiration(ctx context.Context) error {
 				n.Lock()
 
 				n.log.Info("Key expired", "key", key)
-				err := n.store.Purge(ctx, key)
-				if err != nil {
+				errPurge := n.store.Purge(ctx, key)
+				if errPurge != nil {
 					n.Unlock()
 					continue
 				}
 
-				err = n.expirationStore.Purge(ctx, key)
-				if err != nil {
+				errPurge = n.expirationStore.Purge(ctx, key)
+				if errPurge != nil {
 					n.Unlock()
 					continue
 				}

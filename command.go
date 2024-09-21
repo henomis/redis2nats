@@ -132,7 +132,7 @@ func (c *Command) cmdRESPCommand(reader *bufio.Reader, input string) (string, er
 
 	cmd, ok := c.redisCommands[strings.ToUpper(commandParts[0])]
 	if !ok {
-		return redisNOP, &ErrCommandNotSupported{Command: commandParts[0]}
+		return redisNOP, &CommandNotSupportedError{Command: commandParts[0]}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.natsTimeout)
@@ -185,13 +185,13 @@ func (c *Command) cmdSet(ctx context.Context, args ...string) (string, error) {
 			return redisNOP, ErrWrongNumArgs
 		}
 
-		seconds, err := strconv.Atoi(args[index+1])
-		if err != nil {
+		seconds, errAtoi := strconv.Atoi(args[index+1])
+		if errAtoi != nil {
 			return redisNOP, ErrCmdFailed
 		}
 
-		err = c.storage.Expire(ctx, key, time.Duration(seconds)*time.Second)
-		if err != nil {
+		errEpire := c.storage.Expire(ctx, key, time.Duration(seconds)*time.Second)
+		if errEpire != nil {
 			return redisNOP, ErrCmdFailed
 		}
 	}
